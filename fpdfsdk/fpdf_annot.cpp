@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "constants/annotation_common.h"
+#include "constants/form_fields.h"
+#include "constants/form_flags.h"
 #include "core/fpdfapi/edit/cpdf_pagecontentgenerator.h"
 #include "core/fpdfapi/page/cpdf_annotcontext.h"
 #include "core/fpdfapi/page/cpdf_form.h"
@@ -27,6 +29,7 @@
 #include "core/fpdfapi/parser/cpdf_string.h"
 #include "core/fpdfapi/parser/fpdf_parser_utility.h"
 #include "core/fpdfdoc/cpdf_annot.h"
+#include "core/fpdfdoc/cpdf_annotlist.h"
 #include "core/fpdfdoc/cpdf_color_utils.h"
 #include "core/fpdfdoc/cpdf_formfield.h"
 #include "core/fpdfdoc/cpdf_generateap.h"
@@ -470,6 +473,71 @@ FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV FPDFPage_RemoveAnnot(FPDF_PAGE page,
     return false;
 
   pAnnots->RemoveAt(index);
+  return true;
+}
+
+FPDF_EXPORT FPDF_BOOL FPDF_CALLCONV
+FPDFAnnot_GenerateAP(FPDF_ANNOTATION annot) {
+  CPDF_Dictionary* pAnnotDict = GetMutableAnnotDictFromFPDFAnnotation(annot);
+  CPDF_AnnotContext* pAnnot = CPDFAnnotContextFromFPDFAnnotation(annot);
+
+  const IPDF_Page* page = pAnnot->GetPage();
+
+  if(!pAnnot || !pAnnotDict)
+    return false;
+
+  CPDF_Document* pDoc = page->GetDocument();
+  const CPDF_Annot::Subtype pAnnotType = CPDF_Annot::StringToAnnotSubtype(
+    pAnnotDict->GetByteStringFor(pdfium::annotation::kSubtype)
+  );
+
+  // The rest of this function borrows liberally from
+  // `CPDF_ANNOTLIST::GenerateAP()`.
+  // The differences being: `GenerateAP()` is private, it only handles
+  // form widgets, and this returns a boolean result.
+  if (pAnnotType != CPDF_Annot::Subtype::WIDGET) {
+    return CPDF_GenerateAP::GenerateAnnotAP(pDoc, pAnnotDict, pAnnotType);
+  }
+
+  RetainPtr<const CPDF_Object> pFieldTypeObj =
+      CPDF_FormField::GetFieldAttrForDict(pAnnotDict, pdfium::form_fields::kFT);
+  if (!pFieldTypeObj)
+    return false;
+
+  ByteString field_type = pFieldTypeObj->GetString();
+  if (field_type == pdfium::form_fields::kTx) {
+    CPDF_GenerateAP::GenerateFormAP(pDoc, pAnnotDict,
+                                    CPDF_GenerateAP::kTextField);
+    return true;
+  }
+
+  RetainPtr<const CPDF_Object> pFieldFlagsObj =
+      CPDF_FormField::GetFieldAttrForDict(pAnnotDict, pdfium::form_fields::kFf);
+  uint32_t flags = pFieldFlagsObj ? pFieldFlagsObj->GetInteger() : 0;
+  if (field_type == pdfium::form_fields::kCh) {
+    auto type = (flags & pdfium::form_flags::kChoiceCombo)
+                    ? CPDF_GenerateAP::kComboBox
+                    : CPDF_GenerateAP::kListBox;
+    CPDF_GenerateAP::GenerateFormAP(pDoc, pAnnotDict, type);
+    return true;
+  }
+
+  if (field_type != pdfium::form_fields::kBtn)
+    return false;
+  if (flags & pdfium::form_flags::kButtonPushbutton)
+    return false;
+  if (pAnnotDict->KeyExist(pdfium::annotation::kAS))
+    return false;
+
+  RetainPtr<const CPDF_Dictionary> pParentDict =
+      pAnnotDict->GetDictFor(pdfium::form_fields::kParent);
+  if (!pParentDict || !pParentDict->KeyExist(pdfium::annotation::kAS))
+    return false;
+
+  pAnnotDict->SetNewFor<CPDF_String>(
+      pdfium::annotation::kAS,
+      pParentDict->GetByteStringFor(pdfium::annotation::kAS));
+
   return true;
 }
 
